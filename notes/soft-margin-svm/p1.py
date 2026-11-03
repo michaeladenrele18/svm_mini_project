@@ -16,7 +16,7 @@ from scipy.optimize import LinearConstraint
 from scipy.optimize import minimize
 
 data = np.loadtxt(
-    'hard-margin-svm/SAheart.data', delimiter=",", skiprows=1, usecols=[3, 4, 6, 7, 8, 9, 10])
+    '../hard-margin-svm/SAheart.data', delimiter=",", skiprows=1, usecols=[3, 4, 6, 7, 8, 9, 10])
 data = data[-16:, :]
 X = data[:, :6]
 Y = data[:, 6]
