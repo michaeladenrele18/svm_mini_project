@@ -287,3 +287,122 @@ def predict(X, w, b):
 
     return predictions
 
+
+class SVM:
+    def __init__(self, C=1.0):
+        """
+        Initialize a linear soft-margin SVM.
+
+        Parameters:
+            C: Regularization parameter
+        """
+        if C <= 0:
+            raise ValueError("C must be positive.")
+
+        self.C = C
+
+        # Parameters learned during training
+        self.alpha = None
+        self.w = None
+        self.b = None
+
+        # Support vector information
+        self.support_vectors = None
+        self.support_labels = None
+        self.support_alpha = None
+
+    def fit(self, X, y):
+        """
+        Train the SVM using dual quadratic optimization.
+
+        Parameters:
+            X: Training features (n_samples, n_features)
+            y: Training labels (n_samples,)
+
+        Returns:
+            self: Trained SVM model
+        """
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+
+        # Validate input
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D feature matrix.")
+
+        if y.ndim != 1 or len(y) != len(X):
+            raise ValueError(
+                "y must contain one label per observation."
+            )
+
+        if not np.all(np.isin(y, [-1, 1])):
+            raise ValueError("Labels must be -1 or +1.")
+
+        if len(np.unique(y)) != 2:
+            raise ValueError(
+                "Training data must contain both classes."
+            )
+
+        # Step 1: Solve the dual optimization problem
+        self.alpha = solve_dual_svm(X, y, self.C)
+
+        # Step 2: Identify support vectors
+        (
+            self.support_vectors,
+            self.support_labels,
+            self.support_alpha
+        ) = identify_support_vectors(X, y, self.alpha)
+
+        # Step 3: Calculate weight vector
+        self.w = compute_weights(X, y, self.alpha)
+
+        # Step 4: Calculate bias
+        self.b = compute_bias(
+            X, y, self.alpha, self.w, self.C
+        )
+
+        return self
+
+    def decision_function(self, X):
+        """
+        Calculate decision scores.
+
+        f(X) = Xw + b
+
+        Parameters:
+            X: Observations (n_samples, n_features)
+
+        Returns:
+            scores: Decision scores
+        """
+        if self.w is None or self.b is None:
+            raise RuntimeError(
+                "The model must be fitted before prediction."
+            )
+
+        X = np.asarray(X, dtype=float)
+
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D feature matrix.")
+
+        if X.shape[1] != len(self.w):
+            raise ValueError(
+                "Number of features does not match training data."
+            )
+
+        return decision_function(X, self.w, self.b)
+
+    def predict(self, X):
+        """
+        Predict binary class labels (-1 or +1).
+
+        Parameters:
+            X: Observations (n_samples, n_features)
+
+        Returns:
+            predictions: Predicted class labels
+        """
+        scores = self.decision_function(X)
+
+        predictions = np.where(scores >= 0, 1, -1)
+
+        return predictions
