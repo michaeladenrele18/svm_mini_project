@@ -1,7 +1,7 @@
 import numpy as np
 
 from model.svm import SVM
-from kernels.kernels import linear_kernel, polynomial_kernel, rbf_kernel
+from kernels.kernels import rbf_kernel, linear_kernel
 
 
 def load_dataset(path):
@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     evaluate(
         "Nonlinear circles (RBF kernel)",
-        linear_kernel,
+        rbf_kernel,
         "data/datasets/synthetic/nonlinear_circles_train.csv",
         "data/datasets/synthetic/nonlinear_circles_test.csv",
     )
