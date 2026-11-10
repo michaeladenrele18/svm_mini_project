@@ -2,36 +2,40 @@
 import numpy as np
 from cvxopt import matrix, solvers
 
-def compute_gram_matrix(X):
+from kernels.kernels import linear_kernel
+
+def compute_gram_matrix(X, kernel=linear_kernel):
     """
-    Compute the linear Gram matrix.
+    Compute the Gram matrix for a given kernel.
 
     Parameters:
         X: Training feature matrix (n_samples, n_features)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         K: Gram matrix (n_samples, n_samples)
     """
-    K = X @ X.T
+    K = kernel(X, X)
 
     return K
 
 
-def compute_P(X, y):
+def compute_P(X, y, kernel=linear_kernel):
     """
     Construct the quadratic matrix P for the dual SVM.
 
-    P[i, j] = y[i] * y[j] * (X[i] @ X[j])
+    P[i, j] = y[i] * y[j] * kernel(X[i], X[j])
 
     Parameters:
         X: Training feature matrix (n_samples, n_features)
         y: Class labels (n_samples,), containing -1 or +1
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         P: Quadratic matrix (n_samples, n_samples)
     """
 
-    K = compute_gram_matrix(X)
+    K = compute_gram_matrix(X, kernel)
 
     # Outer product of class labels
     yyT = np.outer(y, y)
@@ -115,7 +119,7 @@ def compute_equality_constraints(y):
     return A, b
 
 
-def solve_dual_svm(X, y, C=1.0):
+def solve_dual_svm(X, y, C=1.0, kernel=linear_kernel):
     """
     Solve the soft-margin SVM dual QP.
 
@@ -124,7 +128,7 @@ def solve_dual_svm(X, y, C=1.0):
     """
 
     # Step 1: Construct the objective
-    P = compute_P(X, y)
+    P = compute_P(X, y, kernel)
     q = compute_q(X)
 
     # Step 2: Construct the constraints
@@ -184,126 +188,115 @@ def identify_support_vectors(X, y, alpha, tol=1e-5):
 
 
 
-def compute_weights(X, y, alpha):
+def compute_bias(X, y, alpha, C, kernel=linear_kernel, tol=1e-5):
     """
-    Calculate the linear SVM weight vector.
+    Calculate the bias using margin support vectors,
+    via the kernel trick.
 
-    w = sum(alpha_i * y_i * x_i)
-
-    Parameters:
-        X: Training features (n_samples, n_features)
-        y: Training labels (n_samples,)
-        alpha: Optimal Lagrange multipliers (n_samples,)
-
-    Returns:
-        w: Weight vector (n_features,)
-    """
-
-    # Multiply each alpha by its class label
-    weighted_labels = alpha * y
-
-    # Sum the weighted training feature vectors
-    w = X.T @ weighted_labels
-
-    return w
-
-
-def compute_bias(X, y, alpha, w, C, tol=1e-5):
-    """
-    Calculate the bias for a linear SVM using
-    margin support vectors.
+    b = mean( y_i - sum_j(alpha_j * y_j * K(x_j, x_i)) )
+    over margin support vectors i (0 < alpha_i < C).
 
     Parameters:
         X: Training features (n_samples, n_features)
         y: Training labels (n_samples,)
         alpha: Optimal Lagrange multipliers
-        w: Linear SVM weight vector
         C: Regularization parameter
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
         tol: Numerical tolerance
 
     Returns:
         b: SVM bias (scalar)
     """
 
-    # Identify margin support vectors: 0 < alpha_i < C
-    mask = (alpha > tol) & (alpha < C - tol)
+    sv_mask = alpha > tol
+    margin_mask = (alpha > tol) & (alpha < C - tol)
 
-    if not np.any(mask):
+    if not np.any(margin_mask):
         raise ValueError(
             "No margin support vectors found. "
             "A KKT-based bias fallback is required."
         )
 
-    # Select eligible observations
-    X_margin = X[mask]
-    y_margin = y[mask]
+    # Kernel values between margin support vectors and all support vectors
+    K_margin = kernel(X[margin_mask], X[sv_mask])
 
-    # Calculate bias from each margin support vector
-    bias_values = y_margin - X_margin @ w
+    # Decision scores (without bias) for the margin support vectors
+    decision = K_margin @ (alpha[sv_mask] * y[sv_mask])
 
     # Average to reduce numerical error
-    b = np.mean(bias_values)
+    b = np.mean(y[margin_mask] - decision)
 
     return float(b)
 
 
-def decision_function(X, w, b):
+def decision_function(X, support_vectors, support_labels, support_alpha, b, kernel=linear_kernel):
     """
-    Calculate decision scores for a linear SVM.
+    Calculate decision scores via the kernel trick.
+
+    f(x) = sum(alpha_i * y_i * K(sv_i, x)) + b
 
     Parameters:
         X: Observations (n_samples, n_features)
-        w: Weight vector (n_features,)
+        support_vectors: Support vector features
+        support_labels: Support vector labels
+        support_alpha: Support vector multipliers
         b: Bias (scalar)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         scores: Decision scores (n_samples,)
     """
 
-    # Calculate f(X) = Xw + b
-    scores = X @ w + b
+    K = kernel(X, support_vectors)
+
+    scores = K @ (support_alpha * support_labels) + b
 
     return scores
 
 
-def predict(X, w, b):
+def predict(X, support_vectors, support_labels, support_alpha, b, kernel=linear_kernel):
     """
-    Predict binary class labels using a linear SVM.
+    Predict binary class labels using the kernel trick.
 
     Parameters:
         X: Observations (n_samples, n_features)
-        w: Weight vector (n_features,)
+        support_vectors: Support vector features
+        support_labels: Support vector labels
+        support_alpha: Support vector multipliers
         b: Bias (scalar)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         predictions: Predicted labels (-1 or +1)
     """
 
-    # Calculate decision scores
-    scores = decision_function(X, w, b)
+    scores = decision_function(
+        X, support_vectors, support_labels, support_alpha, b, kernel
+    )
 
-    # Convert scores into class labels
     predictions = np.where(scores >= 0, 1, -1)
 
     return predictions
 
 
 class SVM:
-    def __init__(self, C=1.0):
+    def __init__(self, C=1.0, kernel=linear_kernel):
         """
-        Initialize a linear soft-margin SVM.
+        Initialize a soft-margin SVM.
 
         Parameters:
             C: Regularization parameter
+            kernel: Kernel function K(X1, X2) -> (len(X1), len(X2)).
+                Defaults to the linear kernel.
         """
         if C <= 0:
             raise ValueError("C must be positive.")
 
         self.C = C
+        self.kernel = kernel
 
         # Parameters learned during training
         self.alpha = None
-        self.w = None
         self.b = None
 
         # Support vector information
@@ -343,7 +336,7 @@ class SVM:
             )
 
         # Step 1: Solve the dual optimization problem
-        self.alpha = solve_dual_svm(X, y, self.C)
+        self.alpha = solve_dual_svm(X, y, self.C, self.kernel)
 
         # Step 2: Identify support vectors
         (
@@ -352,12 +345,9 @@ class SVM:
             self.support_alpha
         ) = identify_support_vectors(X, y, self.alpha)
 
-        # Step 3: Calculate weight vector
-        self.w = compute_weights(X, y, self.alpha)
-
-        # Step 4: Calculate bias
+        # Step 3: Calculate bias
         self.b = compute_bias(
-            X, y, self.alpha, self.w, self.C
+            X, y, self.alpha, self.C, self.kernel
         )
 
         return self
@@ -366,7 +356,7 @@ class SVM:
         """
         Calculate decision scores.
 
-        f(X) = Xw + b
+        f(x) = sum(alpha_i * y_i * K(sv_i, x)) + b
 
         Parameters:
             X: Observations (n_samples, n_features)
@@ -374,7 +364,7 @@ class SVM:
         Returns:
             scores: Decision scores
         """
-        if self.w is None or self.b is None:
+        if self.support_vectors is None or self.b is None:
             raise RuntimeError(
                 "The model must be fitted before prediction."
             )
@@ -384,12 +374,19 @@ class SVM:
         if X.ndim != 2:
             raise ValueError("X must be a 2D feature matrix.")
 
-        if X.shape[1] != len(self.w):
+        if X.shape[1] != self.support_vectors.shape[1]:
             raise ValueError(
                 "Number of features does not match training data."
             )
 
-        return decision_function(X, self.w, self.b)
+        return decision_function(
+            X,
+            self.support_vectors,
+            self.support_labels,
+            self.support_alpha,
+            self.b,
+            self.kernel
+        )
 
     def predict(self, X):
         """
