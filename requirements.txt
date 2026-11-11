@@ -1,2 +1,3 @@
 numpy
 cvxopt
+scikit-learn

@@ -1,37 +1,49 @@
 
 import numpy as np
 from cvxopt import matrix, solvers
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
+from sklearn.svm import SVC
 
-def compute_gram_matrix(X):
+from functools import partial
+
+from kernels.kernels import linear_kernel, rbf_kernel, polynomial_kernel
+
+KERNELS = {"linear": linear_kernel, "rbf": rbf_kernel, "poly": polynomial_kernel}
+
+
+def compute_gram_matrix(X, kernel=linear_kernel):
     """
-    Compute the linear Gram matrix.
+    Compute the Gram matrix for a given kernel.
 
     Parameters:
         X: Training feature matrix (n_samples, n_features)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         K: Gram matrix (n_samples, n_samples)
     """
-    K = X @ X.T
+    K = kernel(X, X)
 
     return K
 
 
-def compute_P(X, y):
+def compute_P(X, y, kernel=linear_kernel):
     """
     Construct the quadratic matrix P for the dual SVM.
 
-    P[i, j] = y[i] * y[j] * (X[i] @ X[j])
+    P[i, j] = y[i] * y[j] * kernel(X[i], X[j])
 
     Parameters:
         X: Training feature matrix (n_samples, n_features)
         y: Class labels (n_samples,), containing -1 or +1
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         P: Quadratic matrix (n_samples, n_samples)
     """
 
-    K = compute_gram_matrix(X)
+    K = compute_gram_matrix(X, kernel)
 
     # Outer product of class labels
     yyT = np.outer(y, y)
@@ -55,9 +67,10 @@ def compute_q(X):
         q: Linear vector (n_samples,)
     """
 
-    n_samples = X.shape[0] # gets the number of training observations
+    n_samples = X.shape[0]  # gets the number of training observations
 
-    q = -np.ones(n_samples) # create a vector of -1's with length equal to the number of training observations
+    # create a vector of -1's with length equal to the number of training observations
+    q = -np.ones(n_samples)
 
     return q
 
@@ -80,15 +93,16 @@ def compute_inequality_constraints(X, C):
     if C <= 0:
         raise ValueError("C must be positive.")
 
-    n_samples = X.shape[0] # gets the number of training observations
+    n_samples = X.shape[0]  # gets the number of training observations
 
     I = np.eye(n_samples)   # identity matrix of size n_samples
 
-    G = np.vstack((-I, I))   # stack -I and I vertically to form the inequality matrix
+    # stack -I and I vertically to form the inequality matrix
+    G = np.vstack((-I, I))
 
-    h = np.hstack(( 
+    h = np.hstack((
         np.zeros(n_samples),
-        C * np.ones(n_samples) 
+        C * np.ones(n_samples)
     ))
 
     return G, h
@@ -115,7 +129,7 @@ def compute_equality_constraints(y):
     return A, b
 
 
-def solve_dual_svm(X, y, C=1.0):
+def solve_dual_svm(X, y, C=1.0, kernel=linear_kernel):
     """
     Solve the soft-margin SVM dual QP.
 
@@ -124,7 +138,7 @@ def solve_dual_svm(X, y, C=1.0):
     """
 
     # Step 1: Construct the objective
-    P = compute_P(X, y)
+    P = compute_P(X, y, kernel)
     q = compute_q(X)
 
     # Step 2: Construct the constraints
@@ -155,7 +169,6 @@ def solve_dual_svm(X, y, C=1.0):
     return alpha
 
 
-
 def identify_support_vectors(X, y, alpha, tol=1e-5):
     """
     Identify support vectors from optimal multipliers.
@@ -183,133 +196,141 @@ def identify_support_vectors(X, y, alpha, tol=1e-5):
     return support_vectors, support_labels, support_alpha
 
 
-
-def compute_weights(X, y, alpha):
+def compute_bias(X, y, alpha, C, kernel=linear_kernel, tol=1e-5):
     """
-    Calculate the linear SVM weight vector.
+    Calculate the bias using margin support vectors,
+    via the kernel trick.
 
-    w = sum(alpha_i * y_i * x_i)
-
-    Parameters:
-        X: Training features (n_samples, n_features)
-        y: Training labels (n_samples,)
-        alpha: Optimal Lagrange multipliers (n_samples,)
-
-    Returns:
-        w: Weight vector (n_features,)
-    """
-
-    # Multiply each alpha by its class label
-    weighted_labels = alpha * y
-
-    # Sum the weighted training feature vectors
-    w = X.T @ weighted_labels
-
-    return w
-
-
-def compute_bias(X, y, alpha, w, C, tol=1e-5):
-    """
-    Calculate the bias for a linear SVM using
-    margin support vectors.
+    b = mean( y_i - sum_j(alpha_j * y_j * K(x_j, x_i)) )
+    over margin support vectors i (0 < alpha_i < C).
 
     Parameters:
         X: Training features (n_samples, n_features)
         y: Training labels (n_samples,)
         alpha: Optimal Lagrange multipliers
-        w: Linear SVM weight vector
         C: Regularization parameter
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
         tol: Numerical tolerance
 
     Returns:
         b: SVM bias (scalar)
     """
 
-    # Identify margin support vectors: 0 < alpha_i < C
-    mask = (alpha > tol) & (alpha < C - tol)
+    sv_mask = alpha > tol
+    margin_mask = (alpha > tol) & (alpha < C - tol)
 
-    if not np.any(mask):
+    if not np.any(margin_mask):
         raise ValueError(
             "No margin support vectors found. "
             "A KKT-based bias fallback is required."
         )
 
-    # Select eligible observations
-    X_margin = X[mask]
-    y_margin = y[mask]
+    # Kernel values between margin support vectors and all support vectors
+    K_margin = kernel(X[margin_mask], X[sv_mask])
 
-    # Calculate bias from each margin support vector
-    bias_values = y_margin - X_margin @ w
+    # Decision scores (without bias) for the margin support vectors
+    decision = K_margin @ (alpha[sv_mask] * y[sv_mask])
 
     # Average to reduce numerical error
-    b = np.mean(bias_values)
+    b = np.mean(y[margin_mask] - decision)
 
     return float(b)
 
 
-def decision_function(X, w, b):
+def decision_function(X, support_vectors, support_labels, support_alpha, b, kernel=linear_kernel):
     """
-    Calculate decision scores for a linear SVM.
+    Calculate decision scores via the kernel trick.
+
+    f(x) = sum(alpha_i * y_i * K(sv_i, x)) + b
 
     Parameters:
         X: Observations (n_samples, n_features)
-        w: Weight vector (n_features,)
+        support_vectors: Support vector features
+        support_labels: Support vector labels
+        support_alpha: Support vector multipliers
         b: Bias (scalar)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         scores: Decision scores (n_samples,)
     """
 
-    # Calculate f(X) = Xw + b
-    scores = X @ w + b
+    K = kernel(X, support_vectors)
+
+    scores = K @ (support_alpha * support_labels) + b
 
     return scores
 
 
-def predict(X, w, b):
+def predict(X, support_vectors, support_labels, support_alpha, b, kernel=linear_kernel):
     """
-    Predict binary class labels using a linear SVM.
+    Predict binary class labels using the kernel trick.
 
     Parameters:
         X: Observations (n_samples, n_features)
-        w: Weight vector (n_features,)
+        support_vectors: Support vector features
+        support_labels: Support vector labels
+        support_alpha: Support vector multipliers
         b: Bias (scalar)
+        kernel: Kernel function K(X1, X2) -> (len(X1), len(X2))
 
     Returns:
         predictions: Predicted labels (-1 or +1)
     """
 
-    # Calculate decision scores
-    scores = decision_function(X, w, b)
+    scores = decision_function(
+        X, support_vectors, support_labels, support_alpha, b, kernel
+    )
 
-    # Convert scores into class labels
     predictions = np.where(scores >= 0, 1, -1)
 
     return predictions
 
 
-class SVM:
-    def __init__(self, C=1.0):
+class SVM(BaseEstimator, ClassifierMixin):
+    def __init__(self, C=1.0, kernel="linear", gamma=1.0, degree=2, coef0=1.0):
         """
-        Initialize a linear soft-margin SVM.
+        Initialize a soft-margin SVM.
+
+        Following sklearn conventions, __init__ only stores the
+        hyperparameters so that clone()/GridSearchCV work correctly.
+        Validation happens in fit().
 
         Parameters:
-            C: Regularization parameter
+            C: Regularization parameter (positive)
+            kernel: "linear", "rbf", "poly", or a callable K(X1, X2) -> (len(X1), len(X2))
+            gamma: RBF kernel width parameter (only used when kernel="rbf")
+            degree: Polynomial degree d (only used when kernel="poly")
+            coef0: Polynomial offset c (only used when kernel="poly")
         """
-        if C <= 0:
-            raise ValueError("C must be positive.")
-
         self.C = C
+        self.kernel = kernel
+        self.gamma = gamma
+        self.degree = degree
+        self.coef0 = coef0
 
-        # Parameters learned during training
-        self.alpha = None
-        self.w = None
-        self.b = None
+    def _get_kernel(self):
+        """
+        Resolve self.kernel into a callable K(X1, X2), binding any
+        kernel hyperparameters (e.g. gamma).
+        """
+        if isinstance(self.kernel, str):
+            if self.kernel not in KERNELS:
+                raise ValueError(
+                    f"Unknown kernel '{self.kernel}'. "
+                    f"Choose from {list(KERNELS)} or pass a callable."
+                )
+            k = KERNELS[self.kernel]
+        elif callable(self.kernel):
+            k = self.kernel
+        else:
+            raise ValueError("kernel must be a string or a callable.")
 
-        # Support vector information
-        self.support_vectors = None
-        self.support_labels = None
-        self.support_alpha = None
+        if k is rbf_kernel:
+            return partial(rbf_kernel, gamma=self.gamma)
+        if k is polynomial_kernel:
+            return partial(polynomial_kernel, degree=self.degree, coef0=self.coef0)
+        return k
 
     def fit(self, X, y):
         """
@@ -322,6 +343,18 @@ class SVM:
         Returns:
             self: Trained SVM model
         """
+        if self.C <= 0:
+            raise ValueError("C must be positive.")
+
+        if self.gamma <= 0:
+            raise ValueError("gamma must be positive.")
+
+        if self.kernel == "poly" and (int(self.degree) != self.degree or self.degree < 1):
+            raise ValueError("degree must be a positive integer.")
+
+        if self.coef0 < 0:
+            raise ValueError("coef0 must be non-negative.")
+
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float)
 
@@ -342,22 +375,25 @@ class SVM:
                 "Training data must contain both classes."
             )
 
+        self.classes_ = np.array([-1, 1])
+        self.n_features_in_ = X.shape[1]
+
+        # Step 0: Resolve the kernel function (with its hyperparameters)
+        self.kernel_ = self._get_kernel()
+
         # Step 1: Solve the dual optimization problem
-        self.alpha = solve_dual_svm(X, y, self.C)
+        self.alpha_ = solve_dual_svm(X, y, self.C, self.kernel_)
 
         # Step 2: Identify support vectors
         (
-            self.support_vectors,
-            self.support_labels,
-            self.support_alpha
-        ) = identify_support_vectors(X, y, self.alpha)
+            self.support_vectors_,
+            self.support_labels_,
+            self.support_alpha_
+        ) = identify_support_vectors(X, y, self.alpha_)
 
-        # Step 3: Calculate weight vector
-        self.w = compute_weights(X, y, self.alpha)
-
-        # Step 4: Calculate bias
-        self.b = compute_bias(
-            X, y, self.alpha, self.w, self.C
+        # Step 3: Calculate bias
+        self.b_ = compute_bias(
+            X, y, self.alpha_, self.C, self.kernel_
         )
 
         return self
@@ -366,7 +402,7 @@ class SVM:
         """
         Calculate decision scores.
 
-        f(X) = Xw + b
+        f(x) = sum(alpha_i * y_i * K(sv_i, x)) + b
 
         Parameters:
             X: Observations (n_samples, n_features)
@@ -374,22 +410,26 @@ class SVM:
         Returns:
             scores: Decision scores
         """
-        if self.w is None or self.b is None:
-            raise RuntimeError(
-                "The model must be fitted before prediction."
-            )
+        check_is_fitted(self, ["support_vectors_", "b_"])
 
         X = np.asarray(X, dtype=float)
 
         if X.ndim != 2:
             raise ValueError("X must be a 2D feature matrix.")
 
-        if X.shape[1] != len(self.w):
+        if X.shape[1] != self.n_features_in_:
             raise ValueError(
                 "Number of features does not match training data."
             )
 
-        return decision_function(X, self.w, self.b)
+        return decision_function(
+            X,
+            self.support_vectors_,
+            self.support_labels_,
+            self.support_alpha_,
+            self.b_,
+            self.kernel_
+        )
 
     def predict(self, X):
         """
